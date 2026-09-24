@@ -103,12 +103,14 @@ pub enum Command {
     NextProfile,
     PreviousProfile,
     NewConnection,
+    RefreshConnection,
     CycleTheme,
     /// Put the palette back up over the font list for this slot, the way
     /// [`Command::QueryHistory`] does for the history.
     PickFont(FontSlot),
     SetFont(FontSlot, String),
     ToggleSidebar,
+    ToggleRowPanel,
     ResetEditorZoom,
     OpenSettings,
 }
@@ -651,6 +653,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         Command::NewConnection,
     ));
     items.push(Item::command(
+        "Refresh connection",
+        chord_hint("refresh_connection", overrides),
+        icon::DATABASE,
+        Command::RefreshConnection,
+    ));
+    items.push(Item::command(
         "Cycle theme",
         chord_hint("cycle_theme", overrides),
         icon::SWITCHER,
@@ -681,6 +689,12 @@ fn command_items(workspace: &Workspace, profile: &Profile, cx: &App) -> Vec<Item
         chord_hint("toggle_sidebar", overrides),
         icon::SIDEBAR,
         Command::ToggleSidebar,
+    ));
+    items.push(Item::command(
+        "Toggle row panel",
+        chord_hint("toggle_row_panel", overrides),
+        icon::ROW_PANEL,
+        Command::ToggleRowPanel,
     ));
     if matches!(session.active, Tab::Query(_)) {
         items.push(Item::command(

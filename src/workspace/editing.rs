@@ -4,6 +4,7 @@
 //! impl live in as many modules as it has concerns; they moved out whole.
 
 use super::*;
+use crate::session::{StaleEdit, StaleResume};
 
 impl Workspace {
     /// Open the "New row" form over the preview in front, one field per column
@@ -223,11 +224,11 @@ impl Workspace {
     /// by arrow is twenty clicks.
     ///
     /// Offsets stay multiples of the limit, the same invariant `turn_page`
-    /// keeps, so the label beside the field still reads the page back exactly.
+    /// keeps, so the field reads the page back exactly once it lands.
     /// Nothing here knows how long the relation is, so a page past its end is
     /// allowed to come back empty rather than be guessed at -- the previous
     /// arrow is the way back from one.
-    pub(crate) fn go_to_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to_page(&mut self, cx: &mut Context<Self>) {
         self.clear_notice();
         let Some((id, input)) = self
             .profile()
@@ -246,7 +247,6 @@ impl Workspace {
             self.note(format!("{typed} is not a page number."), cx);
             return;
         };
-        input.update(cx, |state, cx| state.set_value("", window, cx));
         self.requery_relation(
             id,
             move |_, _, limit, offset| {
@@ -255,6 +255,42 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    /// Show the page in front in the field. Typing is left alone while the
+    /// page stays put; once it moves, the typed number was for a page that is
+    /// no longer the one in front, so it goes too.
+    ///
+    /// From render because the offset moves in more places than one -- the
+    /// arrows, the row-limit chips, a tab switch -- and the field is shared by
+    /// every tab, so reading it back once a frame is the one spot all of them
+    /// pass through.
+    pub(crate) fn sync_page_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile() else {
+            return;
+        };
+        let input = profile.session.page_input.clone();
+        let page = profile
+            .session
+            .active_object()
+            .and_then(|tab| match &tab.body {
+                ObjectBody::Relation { limit, offset, .. } => Some(offset / limit + 1),
+                _ => None,
+            });
+        let Some(page) = page else {
+            return;
+        };
+        let moved = profile.session.page_shown != page;
+        if !moved && input.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        if let Some(profile) = self.profile_mut() {
+            profile.session.page_shown = page;
+        }
+        let page = page.to_string();
+        if input.read(cx).value() != page {
+            input.update(cx, |state, cx| state.set_value(page, window, cx));
+        }
     }
 
     /// A column header was clicked: put that column into the statement's
@@ -362,6 +398,12 @@ impl Workspace {
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
+        let tab = profile.session.active;
+        if results.read(cx).delegate().editable(row, col)
+            && !self.confirm_stale(StaleResume::Open, cx)
+        {
+            return;
+        }
         if results.update(cx, |table, cx| {
             let opened = table.delegate_mut().begin_edit(row, col);
             cx.notify();
@@ -378,14 +420,42 @@ impl Workspace {
         // an edit target the grid deliberately does not expose: a result dbdelve
         // cannot trace to one table has no editable cell anywhere in the row,
         // and one it can has this column alone refused.
-        let traced = {
-            let table = results.read(cx);
-            (0..table.delegate().columns().len()).any(|col| table.delegate().editable(row, col))
+        // A snapshot written before edit targets were kept has none, so it
+        // would read as untraceable too.
+        let (traced, snapshot) = {
+            let grid = results.read(cx).delegate();
+            (
+                (0..grid.columns().len()).any(|col| grid.editable(row, col)),
+                grid.captured().is_some(),
+            )
         };
+        // Checked before the snapshot: running a write again is not the way
+        // back to editable rows.
+        let engine = self.engine();
+        let wrote = self
+            .profile()
+            .and_then(|profile| profile.session.active_query_tab())
+            .is_some_and(|tab| {
+                tab.last_query
+                    .as_deref()
+                    .is_some_and(|statement| !sql::rerunnable(engine, statement))
+            });
         self.note(
-            match traced {
-                true => "This column cannot be edited.".into(),
-                false => "dbdelve cannot tell which table these rows come from.".into(),
+            match (traced, wrote, snapshot) {
+                (true, _, _) => "This column cannot be edited.".into(),
+                (false, true, _) => {
+                    "These rows came from a statement that writes. Fetch them with a SELECT to edit them.".into()
+                }
+                (false, false, true) => match tab {
+                    Tab::Query(_) => {
+                        "These rows are from an earlier session. Run the query again to edit them."
+                            .into()
+                    }
+                    _ => "These rows are from an earlier session. Refresh them to edit.".into(),
+                },
+                (false, false, false) => {
+                    "dbdelve cannot tell which table these rows come from.".into()
+                }
             },
             cx,
         );
@@ -435,6 +505,11 @@ impl Workspace {
         let Some((row, col)) = results.read(cx).delegate().active() else {
             return;
         };
+        if results.read(cx).delegate().editable(row, col)
+            && !self.confirm_stale(StaleResume::Stage(value.clone()), cx)
+        {
+            return;
+        }
         if results.update(cx, |table, cx| {
             let staged = table.delegate_mut().stage(row, col, value);
             cx.notify();
@@ -452,6 +527,89 @@ impl Workspace {
             return;
         }
         self.note("This column cannot be edited.".into(), cx);
+    }
+
+    /// Whether an edit may go ahead on the grid in front, raising the stale-rows
+    /// prompt when it may not. Callers ask only once the grid would otherwise
+    /// take the edit, so the prompt never stands in front of a refusal.
+    fn confirm_stale(&mut self, resume: StaleResume, cx: &mut Context<Self>) -> bool {
+        let Some(profile) = self.profile_mut() else {
+            return false;
+        };
+        let Some(results) = profile.session.active_results().cloned() else {
+            return false;
+        };
+        if !results.read(cx).delegate().unconfirmed() {
+            return true;
+        }
+        if profile.confirmed_stale {
+            results.update(cx, |table, _| table.delegate_mut().confirm_stale());
+            return true;
+        }
+        profile.session.stale_edit = Some(StaleEdit {
+            resume,
+            dont_ask: false,
+        });
+        cx.notify();
+        false
+    }
+
+    pub(crate) fn cancel_stale_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self
+            .profile_mut()
+            .is_some_and(|profile| profile.session.stale_edit.take().is_some());
+        if open {
+            cx.notify();
+        }
+        open
+    }
+
+    pub(crate) fn toggle_stale_dont_ask(&mut self, cx: &mut Context<Self>) {
+        if let Some(profile) = self.profile_mut()
+            && let Some(stale) = &mut profile.session.stale_edit
+        {
+            stale.dont_ask = !stale.dont_ask;
+        }
+        cx.notify();
+    }
+
+    /// Fetch the rows again instead. The edit is dropped: it was aimed at the
+    /// rows being replaced.
+    pub(crate) fn refresh_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_stale_edit(cx);
+        // The statement that produced these rows, not the one under the cursor,
+        // which may be a different statement in the same buffer.
+        let rerun = self.profile().and_then(|profile| {
+            let tab = profile.session.active_query_tab()?;
+            Some((tab.id, tab.last_query.clone()?))
+        });
+        match rerun {
+            Some((id, select)) => self.execute_sql(select, Tab::Query(id), cx),
+            None => self.run_query(&RunQuery, window, cx),
+        }
+    }
+
+    /// Accept the rows as they are and carry on with the edit that asked.
+    pub(crate) fn edit_stale_anyway(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let Some(StaleEdit { resume, dont_ask }) = profile.session.stale_edit.take() else {
+            return;
+        };
+        if let Some(results) = profile.session.active_results().cloned() {
+            results.update(cx, |table, _| table.delegate_mut().confirm_stale());
+        }
+        if dont_ask {
+            profile.confirmed_stale = true;
+            self.remember_profiles(cx);
+        }
+        match resume {
+            StaleResume::Open => self.edit_cell(&EditCell, window, cx),
+            StaleResume::Stage(value) => self.stage_value(value, window, cx),
+            StaleResume::Delete => self.delete_row(&DeleteRow, window, cx),
+        }
+        cx.notify();
     }
 
     /// The grid's own commit was refused by the mode. It has nowhere to say so
@@ -514,6 +672,9 @@ impl Workspace {
             );
             return;
         };
+        if !self.confirm_stale(StaleResume::Delete, cx) {
+            return;
+        }
 
         let borrowed: Vec<(&str, &str)> = keys
             .iter()
@@ -578,6 +739,45 @@ impl Workspace {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
 
+    /// One field of the row panel, taken from the fetched cell rather than the
+    /// re-indented, clipped text the panel paints. The field's button shows a
+    /// tick for a moment after, since a copy otherwise changes nothing on
+    /// screen.
+    pub(crate) fn copy_row_field(&mut self, row_ix: usize, col_ix: usize, cx: &mut Context<Self>) {
+        let Some(results) = self
+            .profile()
+            .and_then(|profile| profile.session.active_results())
+        else {
+            return;
+        };
+        let Some(value) = results
+            .read(cx)
+            .delegate()
+            .cell(row_ix, col_ix)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(value));
+
+        let copied = Some((row_ix, col_ix));
+        self.row_panel.copied = copied;
+        cx.notify();
+        cx.spawn(async move |workspace, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                // A later copy owns the tick now; this timer is not its to clear.
+                if workspace.row_panel.copied == copied {
+                    workspace.row_panel.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Write the result set in front of the user to a file they pick.
     ///
     /// The rows on screen and only those. A relation tab holds what its
@@ -639,9 +839,7 @@ impl Workspace {
         let generation = profile.generation;
         let rows = result.rows.len();
         let suggested = format!("{stem}.{}", format.extension());
-        let directory = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let directory = crate::store::home().unwrap_or_else(|_| PathBuf::from("/"));
         let chosen = cx.prompt_for_new_path(&directory, Some(&suggested));
 
         cx.spawn(async move |workspace, cx| {

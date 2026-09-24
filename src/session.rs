@@ -14,6 +14,7 @@ use std::{collections::HashMap, sync::Arc};
 use gpui::{App, AppContext, Context, Entity, Window};
 use gpui_component::{
     input::{EditorState, InputEvent, InputState},
+    resizable::ResizableState,
     table::TableState,
     tree::TreeState,
 };
@@ -31,7 +32,7 @@ use crate::{
         stored_filter,
     },
     result_grid,
-    result_grid::ResultGrid,
+    result_grid::{NewValue, ResultGrid},
     sql::{Destructive, Mode, SortKey, Verdict},
     store,
     theme::ConnectionColor,
@@ -50,6 +51,10 @@ pub(crate) struct Profile {
     pub(crate) color: Option<ConnectionColor>,
     pub(crate) mode: Mode,
     pub(crate) confirmed: Vec<Destructive>,
+    /// Whether this connection has silenced the prompt before editing rows
+    /// restored from an earlier session. Stored as [`STALE_ROWS`] among
+    /// `confirmed`'s slugs, which a build without it drops as unknown.
+    pub(crate) confirmed_stale: bool,
     pub(crate) generation: u64,
     pub(crate) state: ProfileState,
     pub(crate) catalog: CatalogState,
@@ -115,7 +120,9 @@ impl Profile {
             confirmed: self
                 .confirmed
                 .iter()
-                .map(|kind| kind.slug().to_string())
+                .map(|kind| kind.slug())
+                .chain(self.confirmed_stale.then_some(STALE_ROWS))
+                .map(str::to_string)
                 .collect(),
             // Nothing writes the legacy scalar any more; a buffer's name is a
             // property of its tab now. Kept on the stored shape only so a
@@ -177,11 +184,13 @@ pub(crate) struct Session {
     /// list is wanted while a list is being built, which is a frame.
     pub(crate) history: Vec<String>,
     pub(crate) save_name: Entity<InputState>,
-    /// Where to jump to, never where we are: the label beside it is the only
-    /// claim about the current page, so this holds a typed page until Enter
-    /// spends it and empties it again. One field for the window, because only
-    /// the relation in front can be paged.
+    /// The page in front, and where to jump to once it is typed over: see
+    /// `sync_page_input`. One field for the window, because only the relation
+    /// in front can be paged.
     pub(crate) page_input: Entity<InputState>,
+    /// The page last written into `page_input`, to tell a page that moved
+    /// from one that is being typed over.
+    pub(crate) page_shown: usize,
     pub(crate) naming: bool,
     pub(crate) pending_delete: Option<String>,
     /// The saved query `cmd+w` is asking about.
@@ -207,6 +216,9 @@ pub(crate) struct Session {
     pub(crate) insert_form: Option<InsertForm>,
     /// The statement the mode check stopped, held until the user answers.
     pub(crate) pending_run: Option<PendingRun>,
+    /// The edit held until the user accepts that a restored grid's rows may
+    /// be stale.
+    pub(crate) stale_edit: Option<StaleEdit>,
     /// The structure request each relation tab is waiting on, by tab id.
     ///
     /// A refresh asks for the definition again, and nothing stops a second
@@ -288,6 +300,23 @@ pub(crate) struct PendingRun {
     pub(crate) dont_ask: bool,
 }
 
+/// The `confirmed` slug that silences [`StaleEdit`]'s prompt.
+pub(crate) const STALE_ROWS: &str = "stale-rows";
+
+/// An edit on a restored grid, stopped until the user answers whether to edit
+/// rows fetched in an earlier session.
+pub(crate) struct StaleEdit {
+    pub(crate) resume: StaleResume,
+    pub(crate) dont_ask: bool,
+}
+
+#[derive(Clone)]
+pub(crate) enum StaleResume {
+    Open,
+    Stage(NewValue),
+    Delete,
+}
+
 impl Session {
     pub(crate) fn new(
         id: String,
@@ -323,16 +352,14 @@ impl Session {
         )
         .detach();
 
-        let page_input = cx.new(|cx| InputState::new(window, cx).placeholder("Go to"));
-        // With the window, because arriving empties the field, and clearing an
-        // input is editing it.
-        cx.subscribe_in(
+        let page_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe(
             &page_input,
-            window,
-            |workspace, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    workspace.go_to_page(window, cx);
-                }
+            |workspace, _, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } => workspace.go_to_page(cx),
+                // A page typed and abandoned goes back to the one in front.
+                InputEvent::Blur => cx.notify(),
+                _ => {}
             },
         )
         .detach();
@@ -389,6 +416,7 @@ impl Session {
             history: store::history(&id),
             save_name,
             page_input,
+            page_shown: 0,
             naming: false,
             pending_delete: None,
             pending_close: None,
@@ -397,6 +425,7 @@ impl Session {
             apply_review: None,
             insert_form: None,
             pending_run: None,
+            stale_edit: None,
             structure_requests: HashMap::new(),
         }
     }
@@ -535,6 +564,7 @@ impl Session {
         // A stopped statement must not survive a tab or profile switch and get
         // confirmed against a connection it was never aimed at.
         self.pending_run = None;
+        self.stale_edit = None;
     }
 }
 
@@ -651,6 +681,13 @@ pub(crate) struct QueryTab {
     /// from `plan.is_some()`: a plan that has been read and flipped away from
     /// is still worth keeping to flip back to.
     pub(crate) showing_plan: bool,
+    /// Whether this tab's row-inspector panel is folded away. Per tab, like
+    /// the panel itself (see `RowPanel`), and not persisted.
+    pub(crate) row_panel_folded: bool,
+    /// The row-inspector split's state, per tab: a width dragged to in one
+    /// tab must not resize another's. Not persisted -- a fresh tab always
+    /// starts at the built-in default.
+    pub(crate) row_panel_split: Entity<ResizableState>,
 }
 
 /// A plan, and what it is a plan of.
@@ -703,6 +740,8 @@ impl QueryTab {
             hydrated: false,
             plan: None,
             showing_plan: false,
+            row_panel_folded: false,
+            row_panel_split: cx.new(|_| ResizableState::default()),
         };
         (tab, notice)
     }
@@ -944,6 +983,12 @@ pub(crate) enum ObjectBody {
         /// Whether this tab's snapshot has been looked for yet. See
         /// [`QueryTab::hydrated`].
         hydrated: bool,
+        /// Whether this tab's row-inspector panel is folded away. Per tab:
+        /// see `RowPanel`.
+        row_panel_folded: bool,
+        /// The row-inspector split's state, per tab. See
+        /// [`QueryTab::row_panel_split`].
+        row_panel_split: Entity<ResizableState>,
     },
     Routine(Routine),
 }
@@ -958,10 +1003,11 @@ pub(crate) enum StructureState {
 pub(crate) fn show_snapshot(
     results: &Entity<TableState<ResultGrid>>,
     grid: &store::StoredGrid,
+    mode: Mode,
     cx: &mut Context<Workspace>,
 ) {
     results.update(cx, |table, cx| {
-        *table.delegate_mut() = ResultGrid::restored(grid);
+        *table.delegate_mut() = ResultGrid::restored(grid, mode);
         table.refresh(cx);
     });
 }

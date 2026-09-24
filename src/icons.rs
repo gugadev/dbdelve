@@ -22,7 +22,7 @@ use icondata_core::IconData;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 37] = [
+const ICONS: [(&str, &IconData); 40] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -43,6 +43,7 @@ const ICONS: [(&str, &IconData); 37] = [
     ("icons/ellipsis.svg", icondata_lu::LuEllipsis),
     ("icons/loader-circle.svg", icondata_lu::LuLoaderCircle),
     ("icons/minus.svg", icondata_lu::LuMinus),
+    ("icons/square.svg", icondata_lu::LuSquare),
     ("icons/plus.svg", icondata_lu::LuPlus),
     ("icons/search.svg", icondata_lu::LuSearch),
     ("icons/arrow-up.svg", icondata_lu::LuArrowUp),
@@ -60,6 +61,8 @@ const ICONS: [(&str, &IconData); 37] = [
     ("icons/square-pen.svg", icondata_lu::LuSquarePen),
     ("icons/history.svg", icondata_lu::LuHistory),
     ("icons/panel-left.svg", icondata_lu::LuPanelLeft),
+    ("icons/panel-right.svg", icondata_lu::LuPanelRight),
+    ("icons/copy.svg", icondata_lu::LuCopy),
     ("icons/type.svg", icondata_lu::LuType),
     ("icons/arrow-up-right.svg", icondata_lu::LuArrowUpRight),
     ("icons/shield-alert.svg", icondata_lu::LuShieldAlert),
@@ -69,6 +72,10 @@ const ICONS: [(&str, &IconData); 37] = [
 /// rather than a file.
 pub mod icon {
     pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
+    /// Windows' caption buttons, which dbdelve draws itself there.
+    pub const MINIMIZE: &str = "icons/minus.svg";
+    pub const MAXIMIZE: &str = "icons/square.svg";
+    pub const CLOSE_WINDOW: &str = "icons/close.svg";
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";
     pub const SWITCHER: &str = "icons/chevrons-up-down.svg";
@@ -78,6 +85,8 @@ pub mod icon {
     pub const FULL_ACCESS: &str = "icons/shield-alert.svg";
     /// Folds the explorer column away, and brings it back.
     pub const SIDEBAR: &str = "icons/panel-left.svg";
+    /// Folds the row panel beside a grid away, and brings it back.
+    pub const ROW_PANEL: &str = "icons/panel-right.svg";
     /// A column header's sort state: which way the server ordered the rows, or
     /// that it could be asked to.
     pub const SORT_UP: &str = "icons/sort-ascending.svg";
@@ -98,6 +107,7 @@ pub mod icon {
     pub const PLUS: &str = "icons/plus.svg";
     pub const CHECK: &str = "icons/check.svg";
     pub const CLOSE: &str = "icons/close.svg";
+    pub const COPY: &str = "icons/copy.svg";
     /// A floppy disk, which is what "save" looks like everywhere else.
     pub const SAVE: &str = "icons/save.svg";
     pub const RENAME: &str = "icons/pencil.svg";
@@ -171,6 +181,7 @@ mod tests {
             icon::READ_WRITE,
             icon::FULL_ACCESS,
             icon::SIDEBAR,
+            icon::ROW_PANEL,
             icon::SORT_UP,
             icon::SORT_DOWN,
             icon::SORTABLE,
@@ -189,6 +200,7 @@ mod tests {
             icon::PLUS,
             icon::CHECK,
             icon::CLOSE,
+            icon::COPY,
             icon::SAVE,
             icon::RENAME,
             icon::RUN,

@@ -28,9 +28,9 @@ use crate::{
         CommandPalette, CopyCell, CycleTheme, DeleteRow, DiscardEdits, EditCell, ExplainQuery,
         FollowForeignKey, FormatQuery, FuzzyOpen, NewConnection, NewQuery, NewRow, NextPage,
         NextProfile, NextTab, OpenSettings, PaletteNext, PalettePrevious, PreviousPage,
-        PreviousProfile, PreviousTab, Quit, RefreshRelation, ResetEditorZoom, RunQuery, SaveQuery,
-        SetDefault, SetEmpty, SetNull, ShowEditor, ToggleNextJoin, ToggleSidebar, ZoomEditorIn,
-        ZoomEditorOut,
+        PreviousProfile, PreviousTab, Quit, RefreshConnection, RefreshRelation, ResetEditorZoom,
+        RunQuery, SaveQuery, SetDefault, SetEmpty, SetNull, ShowEditor, ToggleNextJoin,
+        ToggleRowPanel, ToggleSidebar, ZoomEditorIn, ZoomEditorOut,
     },
     db::ExplainMode,
 };
@@ -117,6 +117,7 @@ registry! {
     ("new_connection", "New Connection", None, ["secondary-shift-n"], NewConnection),
     ("close_tab", "Close Tab", None, ["secondary-w"], CloseTab),
     ("refresh_relation", "Refresh Rows", None, ["secondary-r"], RefreshRelation),
+    ("refresh_connection", "Refresh Connection", None, ["secondary-shift-r"], RefreshConnection),
     ("next_tab", "Next Tab", None, ["ctrl-tab"], NextTab),
     ("previous_tab", "Previous Tab", None, ["ctrl-shift-tab"], PreviousTab),
     ("next_profile", "Next Connection", None, ["ctrl-`"], NextProfile),
@@ -133,13 +134,14 @@ registry! {
     ("reset_editor_zoom", "Reset Editor Zoom", None, ["secondary-0"], ResetEditorZoom),
     ("edit_cell", "Edit Cell", Some("Table"), ["enter"], EditCell),
     ("copy_cell", "Copy Cell", Some("Table"), ["secondary-c"], CopyCell),
-    // Not the spreadsheet's `ctrl-shift-n`: on Linux that is New Connection's
+    // Not the spreadsheet's `ctrl-shift-n`: off macOS that is New Connection's
     // keys, and New Connection wins even with a cell focused -- which left
     // this unreachable there. Clearing a cell with the delete key is the
-    // gesture anyway, and it collides with nothing on either platform.
+    // gesture anyway, and it collides with nothing on any platform.
     ("set_null", "Set Cell to NULL", Some("Table"), ["secondary-backspace"], SetNull),
     ("accept_completion", "Accept Completion", Some("Editor > Input"), ["tab"], AcceptCompletion),
     ("toggle_sidebar", "Toggle Sidebar", None, ["secondary-shift-s"], ToggleSidebar),
+    ("toggle_row_panel", "Toggle Row Panel", None, ["secondary-shift-i"], ToggleRowPanel),
     ("quit", "Quit dbdelve", None, ["secondary-q"], Quit),
     // Click or command-palette only today; listed so they can be given a
     // chord for the first time.

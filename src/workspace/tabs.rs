@@ -19,16 +19,57 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn toggle_row_panel(
+        &mut self,
+        _: &ToggleRowPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // With no panel on screen, flipping the flag anyway would open the
+        // next selection already folded.
+        if !self.row_panel.on_screen.get() {
+            return;
+        }
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        match profile.session.active {
+            Tab::Query(id) => {
+                if let Some(tab) = profile.session.query_tab_mut(id) {
+                    tab.row_panel_folded = !tab.row_panel_folded;
+                }
+            }
+            Tab::Object(id) => {
+                if let Some(tab) = profile.session.objects.iter_mut().find(|tab| tab.id == id)
+                    && let ObjectBody::Relation {
+                        row_panel_folded, ..
+                    } = &mut tab.body
+                {
+                    *row_panel_folded = !*row_panel_folded;
+                }
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
         let Some(session) = self.profile().map(|profile| &profile.session) else {
             return;
         };
-        // The chip row draws every query tab before every object tab, so
-        // cycling walks them in that order.
+        // The chip row draws unsaved buffers, then saved queries, then object
+        // tabs, so cycling walks them in that order.
         let tabs: Vec<Tab> = session
             .queries
             .iter()
+            .filter(|query| query.open_query.is_none())
             .map(|tab| Tab::Query(tab.id))
+            .chain(
+                session
+                    .saved_queries
+                    .iter()
+                    .filter_map(|name| session.tab_holding(name))
+                    .map(Tab::Query),
+            )
             .chain(session.objects.iter().map(|tab| Tab::Object(tab.id)))
             .collect();
         if tabs.len() < 2 {
@@ -148,6 +189,9 @@ impl Workspace {
             return;
         }
         if self.close_settings(window, cx) {
+            return;
+        }
+        if self.cancel_stale_edit(cx) {
             return;
         }
         if self.cancel_discard_close(cx) {
